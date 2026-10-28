@@ -48,7 +48,7 @@
         :--listen-peer-urls (peer-url node)
         :--listen-client-urls (client-url node)
         :--advertise-client-urls (client-url node)
-        :--initial-cluster-urls :new
+        :--initial-cluster-state :new
         :--initial-advertise-peer-urls  (peer-url node)
         :--initial-cluster (initial-cluster test))
 
@@ -57,7 +57,11 @@
     (teardown! [_ test node]
       (info node "tearing down etcd")
       (cu/stop-daemon! binary pidfile)
-      (c/su (c/exec :rm :-rf dir)))))
+      (c/su (c/exec :rm :-rf dir)))
+
+    db/LogFiles
+    (log-files [_ test node]
+      [logfile])))
 
 (defn etcd-test
   [opts]
