@@ -1,7 +1,10 @@
 (ns jepsen.etcdemo
   (:require [clojure.tools.logging :refer :all]
             [clojure.string :as str]
-            [jepsen [cli :as cli]
+            [verschlimmbesserung.core :as v]
+            [jepsen
+             [cli :as cli]
+             [client :as client]
              [control :as c]
              [db :as db]
              [tests :as tests]]
@@ -27,6 +30,20 @@
        (map (fn [node]
               (str node "=" (peer-url node))))
        (str/join ",")))
+
+(defrecord Client [conn]
+  client/Client
+  (open! [this test node]
+    (assoc this :conn (v/connect (client-url node)
+                                 {:timeout 5000})))
+
+  (setup! [this test])
+
+  (invoke! [_ test op])
+
+  (teardown! [this test])
+
+  (close! [_ test]))
 
 (defn db
   [version]
@@ -70,6 +87,7 @@
          {:name "etcd"
           :os debian/os
           :db (db "v3.1.5")
+          :client (Client. nil)
           :pure-generators true}))
 
 (defn -main
