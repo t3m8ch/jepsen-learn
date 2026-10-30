@@ -3,14 +3,18 @@
             [clojure.string :as str]
             [verschlimmbesserung.core :as v]
             [jepsen
+             [checker :as checker]
              [cli :as cli]
              [client :as client]
              [control :as c]
              [db :as db]
+             [nemesis :as nemesis]
              [tests :as tests]]
             [jepsen.control.util :as cu]
             [jepsen.os.debian :as debian]
             [jepsen.generator :as gen]
+            [jepsen.checker.timeline :as timeline]
+            [knossos.model :as model]
             [clj-commons.slingshot :refer [try+]]))
 
 (def dir "/opt/etcd")
@@ -45,17 +49,25 @@
   (setup! [this test])
 
   (invoke! [_ test op]
-    (case (:f op)
-      :read (assoc op :type :ok, :value (parse-long-nil (v/get conn "foo")))
-      :write (do (v/reset! conn "foo" (:value op))
-                 (assoc op :type :ok))
-      :cas (try+
-            (let [[old new] (:value op)]
+    (try+
+     (case (:f op)
+       :read (let [value (-> conn
+                             (v/get "foo" {:quorum? true})
+                             parse-long-nil)]
+               (assoc op :type :ok, :value value))
+       :write (do (v/reset! conn "foo" (:value op))
+                  (assoc op :type :ok))
+       :cas (let [[old new] (:value op)]
               (assoc op :type (if (v/cas! conn "foo" old new)
                                 :ok
-                                :fail)))
-            (catch [:errorCode 100] ex
-              (assoc op :type :fail, :error :not-found)))))
+                                :fail))))
+     (catch java.net.SocketTimeoutException e
+       (assoc op
+              :type (if (= :read (:f op)) :fail :info)
+              :error :timeout))
+
+     (catch [:errorCode 100] e
+       (assoc op :type :fail, :error :not-found))))
 
   (teardown! [this test])
 
@@ -109,10 +121,20 @@
           :db (db "v3.1.5")
           :client (Client. nil)
           :pure-generators true
+          :nemesis (nemesis/partition-random-halves)
+          :checker (checker/compose {:perf (checker/perf)
+                                     :linear (checker/linearizable
+                                              {:model (model/cas-register)
+                                               :algorithm :linear})
+                                     :timeline (timeline/html)})
           :generator (->> (gen/mix [r w cas])
                           (gen/stagger 1)
-                          (gen/nemesis nil)
-                          (gen/time-limit 15))}))
+                          (gen/nemesis
+                           (cycle [(gen/sleep 5)
+                                   {:type :info, :f :start}
+                                   (gen/sleep 5)
+                                   {:type :info, :f :stop}]))
+                          (gen/time-limit (:time-limit opts)))}))
 
 (defn -main
   "Handles command line arguments. Can either run a test, or a web server for
