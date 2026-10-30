@@ -9,7 +9,9 @@
              [db :as db]
              [tests :as tests]]
             [jepsen.control.util :as cu]
-            [jepsen.os.debian :as debian]))
+            [jepsen.os.debian :as debian]
+            [jepsen.generator :as gen]
+            [clj-commons.slingshot :refer [try+]]))
 
 (def dir "/opt/etcd")
 (def binary "etcd")
@@ -31,6 +33,9 @@
               (str node "=" (peer-url node))))
        (str/join ",")))
 
+(defn parse-long-nil [s]
+  (when s (parse-long s)))
+
 (defrecord Client [conn]
   client/Client
   (open! [this test node]
@@ -39,7 +44,18 @@
 
   (setup! [this test])
 
-  (invoke! [_ test op])
+  (invoke! [_ test op]
+    (case (:f op)
+      :read (assoc op :type :ok, :value (parse-long-nil (v/get conn "foo")))
+      :write (do (v/reset! conn "foo" (:value op))
+                 (assoc op :type :ok))
+      :cas (try+
+            (let [[old new] (:value op)]
+              (assoc op :type (if (v/cas! conn "foo" old new)
+                                :ok
+                                :fail)))
+            (catch [:errorCode 100] ex
+              (assoc op :type :fail, :error :not-found)))))
 
   (teardown! [this test])
 
@@ -80,6 +96,10 @@
     (log-files [_ test node]
       [logfile])))
 
+(defn r [_ _] {:type :invoke, :f :read, :value nil})
+(defn w [_ _] {:type :invoke, :f :write, :value (rand-int 5)})
+(defn cas [_ _] {:type :invoke, :f :cas, :value [(rand-int 5), (rand-int 5)]})
+
 (defn etcd-test
   [opts]
   (merge tests/noop-test
@@ -88,7 +108,11 @@
           :os debian/os
           :db (db "v3.1.5")
           :client (Client. nil)
-          :pure-generators true}))
+          :pure-generators true
+          :generator (->> (gen/mix [r w cas])
+                          (gen/stagger 1)
+                          (gen/nemesis nil)
+                          (gen/time-limit 15))}))
 
 (defn -main
   "Handles command line arguments. Can either run a test, or a web server for
