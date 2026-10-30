@@ -54,7 +54,7 @@
       (try+
        (case (:f op)
          :read (let [value (-> conn
-                               (v/get k {:quorum? true})
+                               (v/get k {:quorum? (:quorum test)})
                                parse-long-nil)]
                  (assoc op :type :ok, :value (independent/tuple k value)))
 
@@ -119,40 +119,55 @@
 
 (defn etcd-test
   [opts]
-  (merge tests/noop-test
-         opts
-         {:name "etcd"
-          :os debian/os
-          :db (db "v3.1.5")
-          :client (Client. nil)
-          :pure-generators true
-          :nemesis (nemesis/partition-random-halves)
-          :checker (checker/compose
-                    {:perf (checker/perf)
-                     :indep (independent/checker
-                             (checker/compose
-                              {:linear (checker/linearizable
-                                        {:model (model/cas-register)
-                                         :algorithm :linear})
-                               :timeline (timeline/html)}))})
-          :generator (->> (independent/concurrent-generator
-                           10
-                           (range)
-                           (fn [k]
-                             (->> (gen/mix [r w cas])
-                                  (gen/stagger 1/50)
-                                  (gen/limit 100))))
-                          (gen/nemesis
-                           (cycle [(gen/sleep 5)
-                                   {:type :info, :f :start}
-                                   (gen/sleep 5)
-                                   {:type :info, :f :stop}]))
-                          (gen/time-limit (:time-limit opts)))}))
+  (let [quorum (boolean (:quorum opts))]
+    (merge tests/noop-test
+           opts
+           {:name (str "etcd q=" quorum)
+            :os debian/os
+            :db (db "v3.1.5")
+            :client (Client. nil)
+            :quorum quorum
+            :pure-generators true
+            :nemesis (nemesis/partition-random-halves)
+            :checker (checker/compose
+                      {:perf (checker/perf)
+                       :indep (independent/checker
+                               (checker/compose
+                                {:linear (checker/linearizable
+                                          {:model (model/cas-register)
+                                           :algorithm :linear})
+                                 :timeline (timeline/html)}))})
+            :generator (->> (independent/concurrent-generator
+                             10
+                             (range)
+                             (fn [k]
+                               (->> (gen/mix [r w cas])
+                                    (gen/stagger (/ (:rate opts)))
+                                    (gen/limit (:ops-per-key opts)))))
+                            (gen/nemesis
+                             (cycle [(gen/sleep 5)
+                                     {:type :info, :f :start}
+                                     (gen/sleep 5)
+                                     {:type :info, :f :stop}]))
+                            (gen/time-limit (:time-limit opts)))})))
+
+(def cli-opts
+  "Дополнительные параметры командной строки."
+  [["-q" "--quorum" "Использовать кворумное чтение вместо чтения с любого первичного узла."]
+   ["-r" "--rate HZ" "Приблизительное количество запросов в секунду на поток."
+    :default  10
+    :parse-fn read-string
+    :validate [#(and (number? %) (pos? %)) "Должно быть положительным числом"]]
+   [nil "--ops-per-key NUM" "Максимальное количество операций над одним ключом."
+    :default  100
+    :parse-fn parse-long
+    :validate [pos? "Должно быть положительным целым числом."]]])
 
 (defn -main
   "Handles command line arguments. Can either run a test, or a web server for
   browsing results."
   [& args]
-  (cli/run! (merge (cli/single-test-cmd {:test-fn etcd-test})
+  (cli/run! (merge (cli/single-test-cmd {:test-fn etcd-test
+                                         :opt-spec cli-opts})
                    (cli/serve-cmd))
             args))
